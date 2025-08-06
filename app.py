@@ -11,8 +11,9 @@ Werkzeug 3.1.3
 from flask import Flask
 from flask import request
 from flask import jsonify
-from modules.modules import MessageStorage, WriteMessage, Initialization, ReadMessage, returnIfNotNull, DeleteMessage, CreateChannel, Except, is_isoformat, CreateUser, GetUsernames, GetUsernamesAndPasswords, ChangePassword, makeMD5, getPasswordSettings, checkPasswordComplexity, updateSettings, checkIfStringAndDigit, deactivateUser, checkIfUserValid, createToken, checkTokenValidity
+from modules import MessageStorage, WriteMessage, Initialization, ReadMessage, returnIfNotNull, DeleteMessage, CreateChannel, Except, is_isoformat, CreateUser, GetUsernames, GetUsernamesAndPasswords, ChangePassword, makeMD5, getPasswordSettings, checkPasswordComplexity, updateSettings, checkIfStringAndDigit, deactivateUser, checkIfUserValid, createToken, checkTokenValidity, getUserID, checkIfChannelExists, getChannelID, getChannelType, checkIfValidChannel, CanMessageBeSent, CanMessagesBeViewed
 import datetime
+import json
 Initialization()
 
 app = Flask(__name__)
@@ -24,32 +25,48 @@ app = Flask(__name__)
 def storemessage():
 
     # If successful, receive the message data, get the message, create a return message, and write it into Messages.json
-    try:
+    # try:
         messageData = request.get_json()
         actMessage = messageData.get("message")
         token = messageData.get("token")
+        username = messageData.get("username")
+        password = messageData.get("password")
+        otherUsername = messageData.get("receiverUsername")
+        channel = messageData.get("channel")
+        channelPassword = messageData.get("channelPassword")
         if not checkTokenValidity(token):
             return Except("The token is invalid.")
-        if not actMessage or actMessage == "":
-            Except("No message received!")
+       
+        result = CanMessageBeSent(username, password, actMessage, otherUsername, channel, channelPassword)
+        if isinstance(result, int):
+            WriteMessage(actMessage, username, result, 1)
+        else:
+            return result
 
-        WriteMessage(actMessage) # Writes message into Sqlite3 Database
+ # Writes message into Sqlite3 Database
         # Return the result of the operation
         return jsonify({ "result": "OK" }) 
 
     # if something went wrong, clear the return message, set "status" to ERROR, and return it into Messages.json
-    except Exception as e:
-        return Except(e) 
+    # except Exception as e:
+    #     return Except(e) 
     
 # Allows you to view all of the messages
 @app.route('/viewmessages', methods=["POST"])
 def viewMessages():
     # number, user, channel, status, fromDate (datetime, ISO format), toDate
-    try:
+    # try:
         messageData = request.get_json()
         token = messageData.get("token")
+        username = messageData.get("username")
+        password = messageData.get("password")
+        channel = messageData.get("channel")
+        channelPassword = messageData.get("channelPassword")
         if not checkTokenValidity(token):
             return Except("The token is invalid.")
+        result = CanMessagesBeViewed(channel, username, password, channelPassword)
+        if not result == "OKAY":
+            return result
         dictionary = {}
         dictionary['number'] = None
         dictionary['user'] = None
@@ -67,11 +84,6 @@ def viewMessages():
             if 'toDate' in messageData: dictionary['toDate'] = messageData.get("toDate")
         if dictionary['number'] and not dictionary['number'].isdigit():
             return Except("That is not a number.")
-        if dictionary['user'] and not dictionary['user'].isdigit():
-            return Except("That is not a valid ID.")
-        if dictionary['channel'] and not dictionary['channel'].isdigit():
-            return Except("That is not a valid ID.")
-        
         if dictionary["fromDate"] and not dictionary["toDate"]:
             dictionary["toDate"] = datetime.datetime.now().isoformat()
         elif dictionary["toDate"] and not dictionary["fromDate"]:
@@ -87,8 +99,8 @@ def viewMessages():
             if not dictionary[item]:
                 del dictionary[item]
         return jsonify(ReadMessage(**dictionary))
-    except Exception as e:
-        return Except(e)
+    # except Exception as e:
+    #     return Except(e)
 @app.route("/deletemessages", methods=["POST"])
 def deleteMessages():
     try:
@@ -111,25 +123,62 @@ def deleteMessages():
 def createchannel():
 
     # If successful, receive the message data, get the message, create a return message, and write it into Messages.json
-    try:
+    # try:
         messageData = request.get_json()
         channelName = messageData.get("channel")
+        owners = messageData.get("owners")
+        type = messageData.get("type")
         token = messageData.get("token")
+        password = messageData.get("password")
+        other_parameters = messageData.get("other_parameters")
+        if (checkIfValidChannel(channelName)):
+            return Except("A channel with that name already exists.")
+
+        if not (type == "common" or type == "private" or type == "password_protected"):
+            return Except("The type is invalid.")
         if not checkTokenValidity(token):
             return Except("The token is invalid.")
-        if not channelName:
+        if not owners or not type:
+            return Except("Fill out all required fields.")
+        print(channelName)
+        if (not channelName and len(owners) < 2) or not (not channelName and type == "private" and len(owners) == 2) and not channelName:
             return Except("There is no channel name.")
-        CreateChannel(channelName) # Writes message into Sqlite3 Database
+        elif not channelName and len(owners) == 2 and type == "private":
+            channelName = f"{", ".join(owners)}'s chat room"
+        elif not type == "private" and len(owners) > 2:
+            return Except("A private channel can only have two people.")
+        elif channelName and (type == "common" or type == "password_protected"):
+            if (not channelName.isalnum()):
+                return Except("The channel name is invalid.")
+                              
+        for owner in owners:
+            if not checkIfUserValid(owner):
+                return Except(f"{owner} is an invalid user!")
+        if type == "password_protected" and not password:
+            return Except("Password protected channels require a password.")
+        ownerIDs = []
+        for user in owners:
+            ownerIDs.append(getUserID(user)[0][0])
+        if not checkIfChannelExists(channelName):
+            if password and checkPasswordComplexity(password) == "OKAY":
+                print("passowrdOK")
+                password = makeMD5(password)
+                print(password)
+            elif password and not checkPasswordComplexity(password) == "OKAY":
+                return checkPasswordComplexity(password)
+            CreateChannel(channelName, other_parameters, ownerIDs, type, password) # Writes message into Sqlite3 Database
+        else:
+            return Except("A channel with that name already exists.")
         # Return the result of the operation
         return jsonify({ "result": "OK" }) 
 
     # if something went wrong, clear the return message, set "status" to ERROR, and return it into Messages.json
-    except Exception as e:
-        return Except(e)
+    # except Exception as e:
+    #     return Except(e)
     
 @app.route('/register', methods=["POST"])
 def register():
-    try:
+    # try:
         messageData = request.get_json()
         firstName = messageData.get("firstName")
         lastName = messageData.get("lastName")
@@ -148,11 +197,11 @@ def register():
             return jsonify({ "result": "OK" }) 
         else:
             return checkPasswordComplexity(password)
-    except Exception as e:
-        return Except(e) 
+    # except Exception as e:
+    #     return Except(e) 
 @app.route("/authentication", methods=["POST"])
 def authentication():
-    try:
+    # try:
         messageData = request.get_json()
         username = messageData.get("username")
         password = messageData.get("password")
@@ -170,8 +219,8 @@ def authentication():
                     return Except("The username and password do not match.")
         else:
             return Except("That is not an existing username.")
-    except Exception as e:
-        return Except(e) 
+    # except Exception as e:
+    #     return Except(e) 
 
 @app.route("/deleteuser", methods=["POST"])
 def delete_user():
@@ -200,7 +249,7 @@ def delete_user():
 
 @app.route("/changepassword", methods=["POST"])
 def changepassword():
-    try:
+    # try:
         messageData = request.get_json()
         currentPassword = messageData.get("currentPassword")
         newPassword = messageData.get("newPassword")
@@ -226,51 +275,34 @@ def changepassword():
                     return jsonify({ "result": "OK" }) 
         if not noMatch:
             return Except("The password and username do not match.")
-    except Exception as e:
-        return Except(e) 
+    # except Exception as e:
+    #     return Except(e) 
 @app.route('/changesettings', methods=["POST"])
 def changeSettings():
-    try:
+    # try:
         messageData = request.get_json()
-        passwordLength = messageData.get("passwordLength")
-        specialSymbols = messageData.get("specialSymbols")
-        capitalLetters = messageData.get("capitalLetters")
-        number = messageData.get("number")
-        includeSpaces = messageData.get("includeSpaces")
         token = messageData.get("token")
         if not checkTokenValidity(token):
             return Except("The token is invalid.")
-        dictionary = {}
-        dictionary["passwordLength"] = passwordLength
-        dictionary["specialSymbols"] = specialSymbols
-        dictionary["capitalLetters"] = capitalLetters
-        dictionary["number"] = number
-        dictionary["includeSpaces"] = includeSpaces
-        dictCopy = dictionary.copy()
-        for item in dictCopy:
-            if not dictionary[item]:
-                del dictionary[item]
-                
-        if not passwordLength and not specialSymbols and not capitalLetters and not number and not includeSpaces:
+        dictionary = messageData.copy()
+        del dictionary["token"]
+        containsValue = False
+        for item in dictionary:
+            if not dictionary[item] == "":
+                containsValue = True
+                if not checkIfStringAndDigit(dictionary[item]):
+                    return Except("Make sure all values are of integer type.")
+                elif item == "passwordLength" and int(dictionary[item]) <= 2:
+                    return Except("The password length is too short.")
+                elif not item == "TTL" or not item == "passwordLength" and not int(dictionary[item]) == 1 and not int(dictionary[item]) == 0:
+                    return Except(f'The column "{item}" can only be 1 or 0.')
+                elif item == "TTL" or item == "passwordLength":
+                    return Except(f"The {item} is invalid.")
+        
+        if not containsValue:
             return Except("All fields have been left blank.")
-        if not checkIfStringAndDigit(passwordLength) or \
-    not checkIfStringAndDigit(specialSymbols) or \
-    not checkIfStringAndDigit(capitalLetters) or \
-    not checkIfStringAndDigit(number) or \
-    not checkIfStringAndDigit(includeSpaces):
-            return Except("Make sure all values are of integer type.")
-        else:
-            if int(passwordLength) <= 2:
-                return Except("The password length is too short.")
-            if not (int(specialSymbols) == 0 or int(specialSymbols) == 1):
-                return Except('The column "specialSymbols" can only be 1 or 0.')
-            if not (int(capitalLetters) == 0 or int(capitalLetters) == 1):
-                return Except('The column "capitalLetters" can only be 1 or 0.')
-            if not (int(number) == 0 or int(number) == 1):
-                return Except('The column "number" can only be 1 or 0.')
-            if not (int(includeSpaces) == 0 or int(includeSpaces) == 1):
-                return Except('The column "includeSpaces" can only be 1 or 0.')
-            updateSettings(**dictionary)
-            return jsonify({"result": "OK"})
-    except Exception as e:
-        return Except(e) 
+        
+        updateSettings(**dictionary)
+        return jsonify({"result": "OK"})
+    # except Exception as e:
+    #     return Except(e) 

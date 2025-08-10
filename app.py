@@ -11,7 +11,7 @@ Werkzeug 3.1.3
 from flask import Flask
 from flask import request
 from flask import jsonify
-from modules import MessageStorage, WriteMessage, Initialization, ReadMessage, returnIfNotNull, DeleteMessage, CreateChannel, Except, is_isoformat, CreateUser, GetUsernames, GetUsernamesAndPasswords, ChangePassword, makeMD5, getPasswordSettings, checkPasswordComplexity, updateSettings, checkIfStringAndDigit, deactivateUser, checkIfUserValid, createToken, checkTokenValidity, getUserID, checkIfChannelExists, getChannelID, getChannelType, checkIfValidChannel, CanMessageBeSent, CanMessagesBeViewed
+from modules import MessageStorage, WriteMessage, Initialization, ReadMessage, returnIfNotNull, DeleteMessage, CreateChannel, Except, is_isoformat, CreateUser, GetUsernames, GetUsernamesAndPasswords, ChangePassword, makeMD5, getPasswordSettings, checkPasswordComplexity, updateSettings, checkIfStringAndDigit, deactivateUser, checkIfUserValid, createToken, checkTokenValidity, getUserID, checkIfChannelExists, getChannelID, getChannelType, checkIfValidChannel, CanMessageBeSent, CanMessagesBeViewed, checkIfAdmin, upgradeUser, getChannelOwners, DeleteChannel
 import datetime
 import json
 Initialization()
@@ -67,13 +67,15 @@ def viewMessages():
         result = CanMessagesBeViewed(channel, username, password, channelPassword)
         if not result == "OKAY":
             return result
-        dictionary = {}
-        dictionary['number'] = None
-        dictionary['user'] = None
-        dictionary['channel'] = None
-        dictionary['status'] = None
-        dictionary['fromDate'] = None
-        dictionary['toDate'] = None
+        
+        dictionary = {
+            "number": None,
+            "user": None,
+            "channel": None,
+            "status": None,
+            "fromDate":None,
+            "toDate":None
+        }
 
         if messageData:
             if 'number' in messageData: dictionary['number'] = messageData.get("number")
@@ -103,20 +105,27 @@ def viewMessages():
     #     return Except(e)
 @app.route("/deletemessages", methods=["POST"])
 def deleteMessages():
-    try:
+    # try:
         messageData = request.get_json()
         id = messageData.get("id")
         token = messageData.get("token")
+        username = messageData.get("username")
+        password = messageData.get("password")
+        channel = messageData.get('channel')
         if not checkTokenValidity(token):
             return Except("The token is invalid.")
+        if not id or not username or not password or not channel:
+            return Except("Please fill out all fields.")
         if id.isdigit():
-            DeleteMessage(id)
+            result = DeleteMessage(id, username, password, channel)
+            if not result == "OKAY":
+                return result
         else:
             return Except("That is not an ID.")
         return jsonify({ "result": "OK" }) 
 
-    except Exception as e:
-        return Except(e) 
+    # except Exception as e:
+    #     return Except(e) 
 
 # Store Messages
 @app.route('/createchannel', methods=['POST'])
@@ -166,6 +175,7 @@ def createchannel():
                 print(password)
             elif password and not checkPasswordComplexity(password) == "OKAY":
                 return checkPasswordComplexity(password)
+            print(ownerIDs)
             CreateChannel(channelName, other_parameters, ownerIDs, type, password) # Writes message into Sqlite3 Database
         else:
             return Except("A channel with that name already exists.")
@@ -175,7 +185,31 @@ def createchannel():
     # if something went wrong, clear the return message, set "status" to ERROR, and return it into Messages.json
     # except Exception as e:
     #     return Except(e)
-    
+@app.route('/deletechannel', methods=['POST'])
+def deletechannel():
+    messageData = request.get_json()
+    channelName = messageData.get("channel")
+    username = messageData.get("username")
+    password = messageData.get("password")
+    token = messageData.get("token")
+    if not checkTokenValidity(token):
+        return Except("The token is invalid.")
+    if not username or not password or not channelName:
+        return Except("Fill out all required fields.")
+    if not checkIfUserValid(username):
+        return Except("That is an invalid user.")
+    match = False
+    for user in GetUsernamesAndPasswords():
+        if user[0] == username and user[1] == makeMD5(password):
+            match = True
+    if not match:
+        return Except("Username and password don't match.")
+    if not checkIfChannelExists(channelName):
+        return Except("That is not a valid channel.")
+    if not str(getUserID(username)) in getChannelOwners(channelName)[0]:
+        return Except("You must be a channel owner to delete it.")
+    DeleteChannel(channelName)
+    return jsonify({ "result": "OK" })
 @app.route('/register', methods=["POST"])
 def register():
     # try:
@@ -282,10 +316,27 @@ def changeSettings():
     # try:
         messageData = request.get_json()
         token = messageData.get("token")
+        username = messageData.get("username")
+        password = messageData.get("password")
+        
         if not checkTokenValidity(token):
             return Except("The token is invalid.")
+        if not username or not password:
+            return Except("This requires a username and password.")
+        if not checkIfUserValid(username):
+            return Except("That is an invalid user.")
+        match = False
+        for user in GetUsernamesAndPasswords():
+            if user[0] == username and user[1] == makeMD5(password):
+                match = True
+        if not match:
+            return Except("Username and password don't match.")
+        if not checkIfAdmin(username):
+            return Except("You must be an admin to change settings.")
         dictionary = messageData.copy()
         del dictionary["token"]
+        del dictionary["username"]
+        del dictionary["password"]
         containsValue = False
         for item in dictionary:
             if not dictionary[item] == "":
@@ -294,9 +345,9 @@ def changeSettings():
                     return Except("Make sure all values are of integer type.")
                 elif item == "passwordLength" and int(dictionary[item]) <= 2:
                     return Except("The password length is too short.")
-                elif not item == "TTL" or not item == "passwordLength" and not int(dictionary[item]) == 1 and not int(dictionary[item]) == 0:
+                elif not item == "TTL" and not item == "passwordLength" and not int(dictionary[item]) == 1 and not int(dictionary[item]) == 0:
                     return Except(f'The column "{item}" can only be 1 or 0.')
-                elif item == "TTL" or item == "passwordLength":
+                elif (item == "TTL" and not checkIfStringAndDigit(dictionary[item])) or (item == "passwordLength" and not checkIfStringAndDigit(dictionary[item])):
                     return Except(f"The {item} is invalid.")
         
         if not containsValue:
@@ -306,3 +357,31 @@ def changeSettings():
         return jsonify({"result": "OK"})
     # except Exception as e:
     #     return Except(e) 
+
+@app.route('/upgradeuser', methods=["POST"])
+def UpgradeUser():
+    messageData = request.get_json()
+    token = messageData.get("token")
+    username = messageData.get("username")
+    password = messageData.get("password")
+    other_username = messageData.get("receiverUsername")
+    if not checkTokenValidity(token):
+        return Except("The token is invalid.")
+    if not username or not password or not other_username:
+        return Except("Fill out all required fields.")
+    if not checkIfUserValid(username):
+        return Except("That is an invalid user.")
+    if not checkIfUserValid(other_username):
+        return Except("That is an invalid user.")
+    match = False
+    for user in GetUsernamesAndPasswords():
+        if user[0] == username and user[1] == makeMD5(password):
+            match = True
+    if not match:
+        return Except("Username and password don't match.")
+    if not checkIfAdmin(username):
+        return Except("You must be an admin to upgrade a user.")
+    if checkIfAdmin(other_username):
+        return Except("The other user is already an admin.")
+    upgradeUser(other_username)
+    return jsonify({"result": "OK"})
